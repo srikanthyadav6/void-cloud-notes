@@ -2,7 +2,10 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+const base = process.env.GITHUB_PAGES === "true" ? "/void-cloud-notes/" : "/";
+
 export default defineConfig({
+  base,
   plugins: [
     react(),
     VitePWA({
@@ -15,16 +18,16 @@ export default defineConfig({
         theme_color: "#111827",
         background_color: "#f8fafc",
         display: "standalone",
-        start_url: "/",
+        start_url: base,
         icons: [
           {
-            src: "/pwa-192.svg",
+            src: `${base}pwa-192.svg`,
             sizes: "192x192",
             type: "image/svg+xml",
             purpose: "any maskable"
           },
           {
-            src: "/pwa-512.svg",
+            src: `${base}pwa-512.svg`,
             sizes: "512x512",
             type: "image/svg+xml",
             purpose: "any maskable"
