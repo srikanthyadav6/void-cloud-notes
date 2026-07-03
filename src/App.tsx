@@ -1,608 +1,499 @@
-import { useEffect, useMemo, useState } from "react";
-import { EditorContent, useEditor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Placeholder from "@tiptap/extension-placeholder";
-import MiniSearch from "minisearch";
+import { useMemo, useState } from "react";
 import {
-  Archive,
-  Bold,
-  CheckCircle2,
-  Download,
-  FilePlus2,
+  BookOpen,
+  Brain,
+  Code2,
   FileText,
-  FolderPlus,
-  Hash,
-  Italic,
-  List,
-  Plus,
-  RotateCw,
+  Gauge,
+  Layers,
+  Lightbulb,
   Search,
-  Star,
-  Trash2,
-  Wifi,
-  WifiOff
+  ShieldAlert,
+  Sparkles,
+  Target,
+  TerminalSquare
 } from "lucide-react";
-import { createId, db, ensureSeedData, nowIso, queueSync, starterContent } from "./db";
-import type { Folder, InterviewPrepItem, Note, NoteTag, Tag } from "./types";
 
-type View = "notes" | "prep";
-type Filter = { folderId?: string; tagId?: string };
+type Page = "dashboard" | "category" | "note" | "recollection" | "insights" | "cheatsheet";
+type RecallTab = "Quick Recall" | "Deep Explain" | "Scenario" | "Code Output" | "Compare";
 
-const tagColors = ["#2563eb", "#16a34a", "#dc2626", "#9333ea", "#ea580c", "#0891b2"];
+const categories = [
+  { name: "Java Core", notes: 42, questions: 120, progress: 68, summary: "Collections, JVM, streams, exceptions, threads" },
+  { name: "Spring Boot", notes: 35, questions: 90, progress: 54, summary: "Beans, transactions, REST, security, production issues" },
+  { name: "Microservices", notes: 28, questions: 70, progress: 46, summary: "Resilience, messaging, Saga, API gateway, tracing" },
+  { name: "SQL", notes: 25, questions: 62, progress: 61, summary: "Joins, indexes, isolation, query tuning" },
+  { name: "DSA", notes: 40, questions: 140, progress: 39, summary: "Patterns, arrays, trees, graphs, DP" },
+  { name: "Frontend", notes: 30, questions: 84, progress: 57, summary: "React, browser, accessibility, performance" }
+];
+
+const topics = [
+  {
+    title: "HashMap Internals",
+    category: "Java Core",
+    area: "Collections",
+    tags: ["Interview Favorite", "Tricky", "Must Know"],
+    summary: "HashMap uses hashing to store and retrieve key-value pairs, with collision handling and resizing details that matter in interviews.",
+    difficulty: "Medium",
+    recallCount: 7,
+    weak: true
+  },
+  {
+    title: "equals() and hashCode()",
+    category: "Java Core",
+    area: "OOP",
+    tags: ["Must Know", "Code", "Scenario"],
+    summary: "Objects used in hash-based collections must keep equality and hash contracts consistent.",
+    difficulty: "Easy-Medium",
+    recallCount: 5,
+    weak: false
+  },
+  {
+    title: "@Transactional Boundaries",
+    category: "Spring Boot",
+    area: "Transactions",
+    tags: ["Interview Favorite", "Scenario", "Weak Area"],
+    summary: "Transaction behavior depends on proxies, propagation, checked exceptions, and where the method is called from.",
+    difficulty: "Medium-Hard",
+    recallCount: 9,
+    weak: true
+  },
+  {
+    title: "BFS on Grid",
+    category: "DSA",
+    area: "Graphs",
+    tags: ["Code", "Must Know"],
+    summary: "Use a queue, visited matrix, direction arrays, and level-order traversal for shortest path style problems.",
+    difficulty: "Medium",
+    recallCount: 6,
+    weak: false
+  }
+];
+
+const recallQuestions: Record<RecallTab, { question: string; hint: string; answer: string }> = {
+  "Quick Recall": {
+    question: "What happens when two keys produce the same HashMap bucket?",
+    hint: "Think collision handling, equals(), and Java 8 treeification.",
+    answer: "HashMap stores colliding entries in the same bucket, compares keys using equals(), and may treeify a long bucket after thresholds are met."
+  },
+  "Deep Explain": {
+    question: "Explain put() and get() in HashMap without looking at notes.",
+    hint: "Move from hashCode to bucket index to equals comparison.",
+    answer: "put() computes a spread hash, finds a bucket, updates an equal key or appends a node, and may resize. get() repeats the hash/bucket lookup and compares keys."
+  },
+  Scenario: {
+    question: "A HashMap lookup fails after inserting a custom object as key. What could be wrong?",
+    hint: "Mutable key fields and equality contract.",
+    answer: "The key may have changed after insertion, or equals/hashCode may be inconsistent, so the lookup goes to the wrong bucket or cannot match the key."
+  },
+  "Code Output": {
+    question: "What happens if two equal objects return different hash codes?",
+    hint: "Hash collections choose bucket before equals().",
+    answer: "They can land in different buckets, so HashMap/HashSet may fail to find duplicates or existing keys correctly."
+  },
+  Compare: {
+    question: "HashMap vs ConcurrentHashMap: how would you answer in an interview?",
+    hint: "Mention thread safety, locking/CAS, null handling, and use cases.",
+    answer: "HashMap is not thread-safe. ConcurrentHashMap supports concurrent access with internal synchronization/CAS strategies and does not allow null keys or values."
+  }
+};
+
+const weakAreas = ["@Transactional rollback rules", "HashMap resizing", "SQL isolation levels", "Graph BFS edge cases"];
+const bookmarks = ["HashMap Internals", "Spring Boot Backend Round", "Java Cheat Sheet"];
 
 export function App() {
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [tags, setTags] = useState<Tag[]>([]);
-  const [noteTags, setNoteTags] = useState<NoteTag[]>([]);
-  const [prepItems, setPrepItems] = useState<InterviewPrepItem[]>([]);
-  const [selectedNoteId, setSelectedNoteId] = useState<string>();
-  const [view, setView] = useState<View>("notes");
-  const [filter, setFilter] = useState<Filter>({});
-  const [query, setQuery] = useState("");
-  const [online, setOnline] = useState(navigator.onLine);
-  const [syncCount, setSyncCount] = useState(0);
-  const [statusMessage, setStatusMessage] = useState("");
+  const [page, setPage] = useState<Page>("dashboard");
+  const [search, setSearch] = useState("");
+  const [recallTab, setRecallTab] = useState<RecallTab>("Quick Recall");
+  const [showAnswer, setShowAnswer] = useState(false);
 
-  const runAction = async (action: () => Promise<void>, successMessage: string) => {
-    try {
-      setStatusMessage("");
-      await action();
-      setStatusMessage(successMessage);
-    } catch (error) {
-      console.error(error);
-      const message = error instanceof Error ? error.message : "Unknown error";
-      setStatusMessage(`Action failed: ${message}`);
-    }
-  };
+  const searchResults = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    if (!query) return [];
+    return topics.filter((topic) => [topic.title, topic.category, topic.area, topic.summary, ...topic.tags].join(" ").toLowerCase().includes(query));
+  }, [search]);
 
-  const refresh = async () => {
-    const [nextNotes, nextFolders, nextTags, nextNoteTags, nextPrepItems, nextSyncCount] = await Promise.all([
-      db.notes.orderBy("updatedAt").reverse().toArray(),
-      db.folders.orderBy("sortOrder").toArray(),
-      db.tags.orderBy("name").toArray(),
-      db.noteTags.toArray(),
-      db.interviewPrepItems.orderBy("updatedAt").reverse().toArray(),
-      db.syncQueue.count()
-    ]);
+  const activeQuestion = recallQuestions[recallTab];
 
-    const activeNotes = nextNotes.filter((note) => !note.deletedAt && !note.archived);
-    setNotes(activeNotes);
-    setFolders(nextFolders.filter((folder) => !folder.deletedAt));
-    setTags(nextTags.filter((tag) => !tag.deletedAt));
-    setNoteTags(nextNoteTags);
-    setPrepItems(nextPrepItems.filter((item) => !item.deletedAt));
-    setSyncCount(nextSyncCount);
-
-    if (!selectedNoteId && activeNotes[0]) {
-      setSelectedNoteId(activeNotes[0].id);
-    }
-  };
-
-  useEffect(() => {
-    void ensureSeedData().then(refresh);
-
-    const handleOnline = () => setOnline(true);
-    const handleOffline = () => setOnline(false);
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
-
-    return () => {
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
-    };
-  }, []);
-
-  const search = useMemo(() => {
-    const index = new MiniSearch<Note>({
-      fields: ["title", "contentText"],
-      storeFields: ["id"]
-    });
-    index.addAll(notes);
-    return index;
-  }, [notes]);
-
-  const selectedNote = notes.find((note) => note.id === selectedNoteId) ?? notes[0];
-
-  const filteredNotes = useMemo(() => {
-    let next = [...notes];
-
-    if (query.trim()) {
-      const ids = new Set(search.search(query, { prefix: true, fuzzy: 0.2 }).map((result) => result.id));
-      next = next.filter((note) => ids.has(note.id));
-    }
-
-    if (filter.folderId) {
-      next = next.filter((note) => note.folderId === filter.folderId);
-    }
-
-    if (filter.tagId) {
-      const taggedIds = new Set(noteTags.filter((item) => item.tagId === filter.tagId).map((item) => item.noteId));
-      next = next.filter((note) => taggedIds.has(note.id));
-    }
-
-    return next.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt));
-  }, [filter.folderId, filter.tagId, noteTags, notes, query, search]);
-
-  const createNote = async () => {
-    await ensureSeedData();
-    const refreshedFolders = (await db.folders.toArray()).filter((folder) => !folder.deletedAt);
-    const timestamp = nowIso();
-    const note: Note = {
-      id: createId(),
-      title: "Untitled note",
-      contentJson: starterContent(),
-      contentText: "",
-      folderId: filter.folderId ?? refreshedFolders[0]?.id,
-      pinned: false,
-      archived: false,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      version: 1,
-      syncStatus: "pending"
-    };
-
-    await db.notes.add(note);
-    await queueSync({ entityType: "note", entityId: note.id, operation: "create", payload: note });
-    setSelectedNoteId(note.id);
-    await refresh();
-  };
-
-  const updateNote = async (note: Note, patch: Partial<Note>) => {
-    const next = {
-      ...note,
-      ...patch,
-      updatedAt: nowIso(),
-      version: note.version + 1,
-      syncStatus: "pending" as const
-    };
-
-    await db.notes.put(next);
-    await queueSync({ entityType: "note", entityId: note.id, operation: "update", payload: next });
-    await refresh();
-  };
-
-  const createFolder = async () => {
-    const name = window.prompt("Folder name");
-    if (!name?.trim()) return;
-
-    const timestamp = nowIso();
-    const folder: Folder = {
-      id: createId(),
-      name: name.trim(),
-      sortOrder: folders.length + 1,
-      createdAt: timestamp,
-      updatedAt: timestamp
-    };
-
-    await db.folders.add(folder);
-    await queueSync({ entityType: "folder", entityId: folder.id, operation: "create", payload: folder });
-    await refresh();
-  };
-
-  const createTag = async () => {
-    const name = window.prompt("Tag name");
-    if (!name?.trim()) return;
-
-    const timestamp = nowIso();
-    const tag: Tag = {
-      id: createId(),
-      name: name.trim(),
-      color: tagColors[tags.length % tagColors.length],
-      createdAt: timestamp,
-      updatedAt: timestamp
-    };
-
-    await db.tags.add(tag);
-    await queueSync({ entityType: "tag", entityId: tag.id, operation: "create", payload: tag });
-    await refresh();
-  };
-
-  const toggleNoteTag = async (note: Note, tag: Tag) => {
-    const existing = noteTags.find((item) => item.noteId === note.id && item.tagId === tag.id);
-    if (existing) {
-      await db.noteTags.delete([note.id, tag.id]);
-      await queueSync({ entityType: "noteTag", entityId: `${note.id}:${tag.id}`, operation: "delete", payload: existing });
-    } else {
-      const next = { noteId: note.id, tagId: tag.id, createdAt: nowIso() };
-      await db.noteTags.add(next);
-      await queueSync({ entityType: "noteTag", entityId: `${note.id}:${tag.id}`, operation: "create", payload: next });
-    }
-    await refresh();
-  };
-
-  const addPrepItem = async () => {
-    const timestamp = nowIso();
-    const item: InterviewPrepItem = {
-      id: createId(),
-      question: "New interview question",
-      answer: "",
-      topic: "General",
-      difficulty: "Medium",
-      company: "",
-      role: "",
-      noteId: selectedNote?.id,
-      confidence: 1,
-      createdAt: timestamp,
-      updatedAt: timestamp
-    };
-
-    await db.interviewPrepItems.add(item);
-    await queueSync({ entityType: "interviewPrepItem", entityId: item.id, operation: "create", payload: item });
-    setView("prep");
-    await refresh();
-  };
-
-  const addSampleNotes = async () => {
-    await ensureSeedData();
-    const [currentFolders, currentTags] = await Promise.all([db.folders.toArray(), db.tags.toArray()]);
-    const timestamp = nowIso();
-    const inboxId = currentFolders.find((folder) => folder.name === "Inbox")?.id ?? "folder-inbox";
-    const prepFolderId = currentFolders.find((folder) => folder.name === "Interview Prep")?.id ?? "folder-interview-prep";
-    const reactTagId = currentTags.find((tag) => tag.name === "React")?.id ?? "tag-react";
-    const systemDesignTagId = currentTags.find((tag) => tag.name === "System Design")?.id ?? "tag-system-design";
-    const dsaTagId = currentTags.find((tag) => tag.name === "DSA")?.id ?? "tag-dsa";
-
-    const samples: Array<{ note: Note; tagIds: string[] }> = [
-      {
-        note: {
-          id: createId(),
-          title: "React interview checklist",
-          contentJson: starterContent("Review rendering, hooks, memoization, forms, state management, and accessibility examples."),
-          contentText: "Review rendering, hooks, memoization, forms, state management, and accessibility examples.",
-          folderId: prepFolderId,
-          pinned: true,
-          archived: false,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-          version: 1,
-          syncStatus: "pending"
-        },
-        tagIds: [reactTagId]
-      },
-      {
-        note: {
-          id: createId(),
-          title: "System design prompts",
-          contentJson: starterContent("Practice requirements, APIs, data model, caching, consistency, scale, and failure modes."),
-          contentText: "Practice requirements, APIs, data model, caching, consistency, scale, and failure modes.",
-          folderId: prepFolderId,
-          pinned: false,
-          archived: false,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-          version: 1,
-          syncStatus: "pending"
-        },
-        tagIds: [systemDesignTagId]
-      },
-      {
-        note: {
-          id: createId(),
-          title: "DSA revision plan",
-          contentJson: starterContent("Arrays, strings, binary search, trees, graphs, heaps, dynamic programming, and timed practice."),
-          contentText: "Arrays, strings, binary search, trees, graphs, heaps, dynamic programming, and timed practice.",
-          folderId: inboxId,
-          pinned: false,
-          archived: false,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-          version: 1,
-          syncStatus: "pending"
-        },
-        tagIds: [dsaTagId]
-      }
-    ];
-
-    await db.transaction("rw", db.notes, db.noteTags, db.syncQueue, async () => {
-      for (const sample of samples) {
-        await db.notes.add(sample.note);
-        await queueSync({ entityType: "note", entityId: sample.note.id, operation: "create", payload: sample.note });
-
-        for (const tagId of sample.tagIds) {
-          const noteTag = { noteId: sample.note.id, tagId, createdAt: timestamp };
-          await db.noteTags.put(noteTag);
-          await queueSync({ entityType: "noteTag", entityId: `${sample.note.id}:${tagId}`, operation: "create", payload: noteTag });
-        }
-      }
-    });
-
-    setSelectedNoteId(samples[0].note.id);
-    setView("notes");
-    await refresh();
-  };
-
-  const updatePrepItem = async (item: InterviewPrepItem, patch: Partial<InterviewPrepItem>) => {
-    const next = { ...item, ...patch, updatedAt: nowIso() };
-    await db.interviewPrepItems.put(next);
-    await queueSync({ entityType: "interviewPrepItem", entityId: item.id, operation: "update", payload: next });
-    await refresh();
-  };
-
-  const exportData = async () => {
-    const payload = {
-      exportedAt: nowIso(),
-      notes: await db.notes.toArray(),
-      folders: await db.folders.toArray(),
-      tags: await db.tags.toArray(),
-      noteTags: await db.noteTags.toArray(),
-      interviewPrepItems: await db.interviewPrepItems.toArray()
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "void-cloud-notes-export.json";
-    link.click();
-    URL.revokeObjectURL(url);
+  const go = (nextPage: Page) => {
+    setPage(nextPage);
+    setShowAnswer(false);
   };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">V</div>
-          <div>
-            <strong>Void Notes</strong>
-            <span>{online ? "Online" : "Offline"} local-first</span>
-          </div>
-        </div>
-
-        <div className="search-box">
+    <div className="shell">
+      <header className="topbar">
+        <button className="brand" onClick={() => go("dashboard")}>
+          <Brain size={22} />
+          <span>RecallStack</span>
+        </button>
+        <div className="search">
           <Search size={16} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search notes" />
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search topics, traps, questions..." />
         </div>
+        <div className="topbar-meta">Dark</div>
+      </header>
 
-        <nav className="nav-tabs">
-          <button className={view === "notes" ? "active" : ""} onClick={() => setView("notes")}>
-            <FileText size={16} /> Notes
-          </button>
-          <button className={view === "prep" ? "active" : ""} onClick={() => setView("prep")}>
-            <CheckCircle2 size={16} /> Prep
-          </button>
-        </nav>
-
-        <section className="side-section">
-          <div className="section-title">
-            <span>Folders</span>
-            <button aria-label="Create folder" onClick={createFolder}>
-              <FolderPlus size={15} />
-            </button>
-          </div>
-          <button className={!filter.folderId ? "filter active" : "filter"} onClick={() => setFilter((next) => ({ ...next, folderId: undefined }))}>
-            All notes
-          </button>
-          {folders.map((folder) => (
-            <button
-              key={folder.id}
-              className={filter.folderId === folder.id ? "filter active" : "filter"}
-              onClick={() => setFilter((next) => ({ ...next, folderId: folder.id }))}
-            >
-              {folder.name}
-            </button>
-          ))}
-        </section>
-
-        <section className="side-section">
-          <div className="section-title">
-            <span>Tags</span>
-            <button aria-label="Create tag" onClick={createTag}>
-              <Hash size={15} />
-            </button>
-          </div>
-          <button className={!filter.tagId ? "filter active" : "filter"} onClick={() => setFilter((next) => ({ ...next, tagId: undefined }))}>
-            Any tag
-          </button>
-          {tags.map((tag) => (
-            <button
-              key={tag.id}
-              className={filter.tagId === tag.id ? "filter active" : "filter"}
-              onClick={() => setFilter((next) => ({ ...next, tagId: tag.id }))}
-            >
-              <span className="tag-dot" style={{ backgroundColor: tag.color }} />
-              {tag.name}
-            </button>
-          ))}
-        </section>
-
-        <footer className="sync-panel">
-          <span>{online ? <Wifi size={16} /> : <WifiOff size={16} />} Void Cloud sync</span>
-          <strong>{syncCount} queued</strong>
-        </footer>
+      <aside className="sidebar">
+        <NavButton active={page === "dashboard"} icon={<Gauge size={17} />} label="Dashboard" onClick={() => go("dashboard")} />
+        <NavButton active={page === "category"} icon={<Layers size={17} />} label="Java Core" onClick={() => go("category")} />
+        <NavButton active={page === "category"} icon={<Sparkles size={17} />} label="Spring Boot" onClick={() => go("category")} />
+        <NavButton active={page === "category"} icon={<TerminalSquare size={17} />} label="Microservices" onClick={() => go("category")} />
+        <NavButton active={page === "category"} icon={<FileText size={17} />} label="SQL" onClick={() => go("category")} />
+        <NavButton active={page === "category"} icon={<Code2 size={17} />} label="DSA" onClick={() => go("category")} />
+        <NavButton active={page === "recollection"} icon={<Target size={17} />} label="Recollection" onClick={() => go("recollection")} />
+        <NavButton active={page === "insights"} icon={<Lightbulb size={17} />} label="Interview Insights" onClick={() => go("insights")} />
+        <NavButton active={page === "cheatsheet"} icon={<BookOpen size={17} />} label="Cheat Sheets" onClick={() => go("cheatsheet")} />
       </aside>
 
-      <main className="workspace">
-        <header className="topbar">
-          <div>
-            <h1>{view === "notes" ? "Notes" : "Interview Prep"}</h1>
-            <p>{view === "notes" ? "Offline drafts with folders, tags, search, and export." : "Question bank linked back to your notes."}</p>
-          </div>
-          <div className="topbar-actions">
-            <button onClick={exportData}>
-              <Download size={16} /> Export
-            </button>
-            <button onClick={() => void runAction(addPrepItem, "Prep item added")}>
-              <CheckCircle2 size={16} /> Prep item
-            </button>
-            <button onClick={() => void runAction(addSampleNotes, "Sample notes added")}>
-              <FilePlus2 size={16} /> Add samples
-            </button>
-            <button className="primary" onClick={() => void runAction(createNote, "Note added")}>
-              <Plus size={16} /> Note
-            </button>
-          </div>
-        </header>
-
-        {statusMessage && <div className={statusMessage.startsWith("Action failed") ? "status-message error" : "status-message"}>{statusMessage}</div>}
-
-        {view === "notes" ? (
-          <section className="notes-layout">
-            <div className="note-list">
-              {filteredNotes.map((note) => (
-                <button key={note.id} className={selectedNote?.id === note.id ? "note-card active" : "note-card"} onClick={() => setSelectedNoteId(note.id)}>
-                  <span>{note.pinned && <Star size={14} fill="currentColor" />} {note.title}</span>
-                  <small>{note.contentText || "No body text yet"}</small>
-                </button>
-              ))}
-            </div>
-
-            {selectedNote ? (
-              <NoteEditor
-                key={selectedNote.id}
-                folders={folders}
-                note={selectedNote}
-                noteTags={noteTags.filter((item) => item.noteId === selectedNote.id)}
-                tags={tags}
-                onChange={(patch) => updateNote(selectedNote, patch)}
-                onToggleTag={(tag) => toggleNoteTag(selectedNote, tag)}
-              />
-            ) : (
-              <div className="empty-state">Create your first note.</div>
-            )}
-          </section>
-        ) : (
-          <PrepBoard items={prepItems} notes={notes} onUpdate={updatePrepItem} />
+      <main className="content">
+        {searchResults.length > 0 && <SearchResults results={searchResults} openTopic={() => go("note")} startRecall={() => go("recollection")} />}
+        {searchResults.length === 0 && page === "dashboard" && <Dashboard go={go} />}
+        {searchResults.length === 0 && page === "category" && <CategoryPage go={go} />}
+        {searchResults.length === 0 && page === "note" && <NoteDetail go={go} />}
+        {searchResults.length === 0 && page === "recollection" && (
+          <RecollectionPage
+            activeQuestion={activeQuestion}
+            recallTab={recallTab}
+            setRecallTab={setRecallTab}
+            showAnswer={showAnswer}
+            setShowAnswer={setShowAnswer}
+          />
         )}
+        {searchResults.length === 0 && page === "insights" && <InsightsPage go={go} />}
+        {searchResults.length === 0 && page === "cheatsheet" && <CheatSheetPage />}
       </main>
+
+      <aside className="right-panel">
+        <section className="panel-card">
+          <h2>Recall Box</h2>
+          <p>Can I explain this without looking?</p>
+          <div className="button-row">
+            <button className="success">Know</button>
+            <button className="danger">Weak</button>
+          </div>
+        </section>
+        <section className="panel-card">
+          <h2>Weak Areas</h2>
+          <ul className="compact-list">
+            {weakAreas.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+        <section className="panel-card">
+          <h2>Bookmarks</h2>
+          <ul className="compact-list">
+            {bookmarks.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </section>
+      </aside>
     </div>
   );
 }
 
-function NoteEditor({
-  folders,
-  note,
-  noteTags,
-  tags,
-  onChange,
-  onToggleTag
-}: {
-  folders: Folder[];
-  note: Note;
-  noteTags: NoteTag[];
-  tags: Tag[];
-  onChange: (patch: Partial<Note>) => Promise<void>;
-  onToggleTag: (tag: Tag) => Promise<void>;
-}) {
-  const editor = useEditor({
-    extensions: [
-      StarterKit,
-      Placeholder.configure({
-        placeholder: "Write the note..."
-      })
-    ],
-    content: note.contentJson,
-    editorProps: {
-      attributes: {
-        class: "editor-surface"
-      }
-    },
-    onUpdate: ({ editor: currentEditor }) => {
-      void onChange({
-        contentJson: currentEditor.getJSON() as Record<string, unknown>,
-        contentText: currentEditor.getText()
-      });
-    }
-  });
-
+function NavButton({ active, icon, label, onClick }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void }) {
   return (
-    <article className="editor-panel">
-      <input className="title-input" value={note.title} onChange={(event) => void onChange({ title: event.target.value })} />
+    <button className={active ? "nav-button active" : "nav-button"} onClick={onClick}>
+      {icon}
+      {label}
+    </button>
+  );
+}
 
-      <div className="metadata-row">
-        <select value={note.folderId ?? ""} onChange={(event) => void onChange({ folderId: event.target.value || undefined })}>
-          <option value="">No folder</option>
-          {folders.map((folder) => (
-            <option key={folder.id} value={folder.id}>
-              {folder.name}
-            </option>
-          ))}
-        </select>
-        <button className={note.pinned ? "active" : ""} onClick={() => void onChange({ pinned: !note.pinned })}>
-          <Star size={16} /> Pin
-        </button>
-        <button onClick={() => void onChange({ archived: true })}>
-          <Archive size={16} /> Archive
-        </button>
-        <button className="danger" onClick={() => void onChange({ deletedAt: nowIso() })}>
-          <Trash2 size={16} /> Trash
-        </button>
+function Dashboard({ go }: { go: (page: Page) => void }) {
+  return (
+    <div className="page-stack">
+      <section className="hero">
+        <div>
+          <p className="eyebrow">Read less. Recall more. Explain better.</p>
+          <h1>Prepare smarter. Recall faster. Explain better.</h1>
+          <p>Java Full Stack interview prep notes built around active recall, interview traps, and polished explanations.</p>
+        </div>
+        <div className="hero-actions">
+          <button className="primary" onClick={() => go("recollection")}>Start Recollection</button>
+          <button onClick={() => go("category")}>Browse Topics</button>
+          <button onClick={() => go("insights")}>Interview Insights</button>
+        </div>
+      </section>
+
+      <SectionHeader title="Today's Focus" subtitle="Three prompts worth revising before anything else." />
+      <div className="card-grid three">
+        {topics.slice(0, 3).map((topic) => (
+          <TopicCard key={topic.title} topic={topic} open={() => go("note")} recall={() => go("recollection")} />
+        ))}
       </div>
 
+      <SectionHeader title="Categories" subtitle="Pick a track and study by explanation quality, not page count." />
+      <div className="card-grid">
+        {categories.map((category) => (
+          <button className="category-card" key={category.name} onClick={() => go("category")}>
+            <span>{category.name}</span>
+            <small>{category.summary}</small>
+            <strong>{category.notes} notes · {category.questions} Qs</strong>
+            <Progress value={category.progress} />
+          </button>
+        ))}
+      </div>
+
+      <div className="split-grid">
+        <InfoBlock title="Weak Areas" items={weakAreas} tone="warning" />
+        <InfoBlock title="Recently Revised" items={["equals() and hashCode()", "BFS Grid", "REST idempotency"]} />
+        <InfoBlock title="Insight of the Day" items={["Definitions are not enough. Interviewers check tradeoffs, failure modes, and scenario handling."]} tone="accent" />
+      </div>
+    </div>
+  );
+}
+
+function CategoryPage({ go }: { go: (page: Page) => void }) {
+  return (
+    <div className="page-stack">
+      <PageHeader title="Java Core" subtitle="Collections, Streams, JVM, Exceptions, Multithreading" />
+      <div className="filters">
+        {["All", "Interview Favorite", "Tricky", "Weak", "Code"].map((filter) => (
+          <button className={filter === "All" ? "active" : ""} key={filter}>{filter}</button>
+        ))}
+      </div>
+      <div className="topic-list">
+        {topics.map((topic) => (
+          <TopicCard key={topic.title} topic={topic} open={() => go("note")} recall={() => go("recollection")} wide />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function NoteDetail({ go }: { go: (page: Page) => void }) {
+  return (
+    <article className="note-detail">
+      <PageHeader title="HashMap Internals" subtitle="Java Core / Collections" />
       <div className="tag-row">
-        {tags.map((tag) => {
-          const active = noteTags.some((item) => item.tagId === tag.id);
-          return (
-            <button key={tag.id} className={active ? "tag-pill active" : "tag-pill"} onClick={() => void onToggleTag(tag)}>
-              <span style={{ backgroundColor: tag.color }} />
-              {tag.name}
-            </button>
-          );
-        })}
+        {["Interview Favorite", "Tricky", "Must Know"].map((tag) => <span className="tag" key={tag}>{tag}</span>)}
+        <span className="difficulty">Difficulty: Medium</span>
       </div>
 
-      <div className="toolbar">
-        <button className={editor?.isActive("bold") ? "active" : ""} onClick={() => editor?.chain().focus().toggleBold().run()}>
-          <Bold size={16} />
-        </button>
-        <button className={editor?.isActive("italic") ? "active" : ""} onClick={() => editor?.chain().focus().toggleItalic().run()}>
-          <Italic size={16} />
-        </button>
-        <button className={editor?.isActive("bulletList") ? "active" : ""} onClick={() => editor?.chain().focus().toggleBulletList().run()}>
-          <List size={16} />
-        </button>
-        <span>{note.syncStatus === "pending" ? "Pending sync" : "Synced"}</span>
-      </div>
-
-      <EditorContent editor={editor} />
+      <NoteSection title="Quick Definition">
+        HashMap stores key-value pairs using hashing and gives average O(1) lookup when hashing and equality are implemented correctly.
+      </NoteSection>
+      <NoteSection title="Mental Model">
+        <code>Key -&gt; hashCode() -&gt; bucket index -&gt; equals() comparison -&gt; return value</code>
+      </NoteSection>
+      <NoteSection title="Interview Answer">
+        In an interview, explain HashMap as a hash-table based Map. It calculates a hash from the key, finds a bucket, handles collisions, compares keys with equals(), and resizes when the load factor threshold is crossed.
+      </NoteSection>
+      <NoteSection title="Deep Explanation">
+        HashMap performance depends on hash distribution, collision count, resizing cost, and key immutability. Since Java 8, very long collision chains can become balanced trees under specific conditions.
+      </NoteSection>
+      <NoteSection title="Code Example">
+        <pre>{`Map<String, Integer> map = new HashMap<>();
+map.put("Java", 1);
+Integer score = map.get("Java");`}</pre>
+      </NoteSection>
+      <NoteSection title="Common Follow-ups">
+        <ul>
+          <li>What happens during collision?</li>
+          <li>Why override equals and hashCode together?</li>
+          <li>What changed after Java 8?</li>
+        </ul>
+      </NoteSection>
+      <NoteSection title="Common Mistakes">
+        <ul>
+          <li>Do not say HashMap is always O(1).</li>
+          <li>Do not ignore the equals/hashCode contract.</li>
+          <li>Do not use mutable objects as keys.</li>
+        </ul>
+      </NoteSection>
+      <NoteSection title="Recollection Checklist">
+        <div className="checklist">
+          {["Can I explain put()?", "Can I explain get()?", "Can I explain collision?", "Can I compare HashMap and ConcurrentHashMap?"].map((item) => (
+            <label key={item}><input type="checkbox" /> {item}</label>
+          ))}
+        </div>
+      </NoteSection>
+      <button className="primary" onClick={() => go("recollection")}>Start Recall</button>
     </article>
   );
 }
 
-function PrepBoard({
-  items,
-  notes,
-  onUpdate
+function RecollectionPage({
+  activeQuestion,
+  recallTab,
+  setRecallTab,
+  showAnswer,
+  setShowAnswer
 }: {
-  items: InterviewPrepItem[];
-  notes: Note[];
-  onUpdate: (item: InterviewPrepItem, patch: Partial<InterviewPrepItem>) => Promise<void>;
+  activeQuestion: { question: string; hint: string; answer: string };
+  recallTab: RecallTab;
+  setRecallTab: (tab: RecallTab) => void;
+  showAnswer: boolean;
+  setShowAnswer: (value: boolean) => void;
 }) {
   return (
-    <section className="prep-grid">
-      {items.map((item) => (
-        <article className="prep-card" key={item.id}>
-          <input value={item.question} onChange={(event) => void onUpdate(item, { question: event.target.value })} />
-          <textarea value={item.answer} onChange={(event) => void onUpdate(item, { answer: event.target.value })} placeholder="Answer notes" />
-          <div className="prep-fields">
-            <input value={item.topic} onChange={(event) => void onUpdate(item, { topic: event.target.value })} placeholder="Topic" />
-            <select value={item.difficulty} onChange={(event) => void onUpdate(item, { difficulty: event.target.value as InterviewPrepItem["difficulty"] })}>
-              <option>Easy</option>
-              <option>Medium</option>
-              <option>Hard</option>
-            </select>
-            <input value={item.role} onChange={(event) => void onUpdate(item, { role: event.target.value })} placeholder="Role" />
-            <select value={item.noteId ?? ""} onChange={(event) => void onUpdate(item, { noteId: event.target.value || undefined })}>
-              <option value="">No linked note</option>
-              {notes.map((note) => (
-                <option key={note.id} value={note.id}>
-                  {note.title}
-                </option>
-              ))}
-            </select>
-          </div>
-          <label className="confidence">
-            <RotateCw size={15} />
-            <input
-              type="range"
-              min="1"
-              max="5"
-              value={item.confidence}
-              onChange={(event) => void onUpdate(item, { confidence: Number(event.target.value) })}
-            />
-            <span>{item.confidence}/5</span>
-          </label>
-        </article>
-      ))}
+    <div className="page-stack">
+      <PageHeader title="Recollection Mode" subtitle="Answer first. Then inspect the explanation." />
+      <div className="filters">
+        {(Object.keys(recallQuestions) as RecallTab[]).map((tab) => (
+          <button className={tab === recallTab ? "active" : ""} key={tab} onClick={() => { setRecallTab(tab); setShowAnswer(false); }}>{tab}</button>
+        ))}
+      </div>
+      <section className="recall-card-large">
+        <p className="eyebrow">Question 4 of 20</p>
+        <h2>{activeQuestion.question}</h2>
+        <div className="button-row centered">
+          <button>Show Hint</button>
+          <button className="primary" onClick={() => setShowAnswer(!showAnswer)}>{showAnswer ? "Hide Answer" : "Show Answer"}</button>
+        </div>
+        <div className="hint">
+          <strong>Hint</strong>
+          <p>{activeQuestion.hint}</p>
+        </div>
+        {showAnswer && <div className="answer"><strong>Answer</strong><p>{activeQuestion.answer}</p></div>}
+        <div className="button-row centered">
+          <button className="success">I knew this</button>
+          <button className="warning">Partially knew</button>
+          <button className="danger">Weak</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function InsightsPage({ go }: { go: (page: Page) => void }) {
+  return (
+    <div className="page-stack">
+      <PageHeader title="Interview Insights" subtitle="What interviewers are really checking." />
+      <div className="insight-list">
+        <InsightCard title="Java Developer - 5 Years Experience" text="They expect practical tradeoffs, not just definitions. You need complexity, contracts, concurrency, and production failure awareness." open={() => go("note")} />
+        <InsightCard title="Spring Boot Backend Round" text="They check REST design, transaction behavior, exception handling, security basics, logging, and debugging production issues." open={() => go("category")} />
+        <section className="insight-detail">
+          <h2>What strong answers sound like</h2>
+          <p><strong>Weak:</strong> HashMap is key-value and has O(1) lookup.</p>
+          <p><strong>Strong:</strong> HashMap usually gives average O(1) lookup using hashing, but collision handling, equals/hashCode, resizing, and Java 8 treeification matter in deeper interviews.</p>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function CheatSheetPage() {
+  return (
+    <div className="page-stack">
+      <PageHeader title="Java Cheat Sheet" subtitle="Dense last-minute revision." />
+      <section className="cheat-sheet">
+        <h2>Collections</h2>
+        <ul>
+          <li><strong>HashMap:</strong> key-value, hashing, collision, equals/hashCode, resizing.</li>
+          <li><strong>ArrayList:</strong> dynamic array, fast random read, slower middle insert/delete.</li>
+          <li><strong>LinkedList:</strong> node-based, rarely better in real production code.</li>
+        </ul>
+        <h2>Java 8</h2>
+        <ul>
+          <li><strong>Stream:</strong> declarative data processing pipeline.</li>
+          <li><strong>map:</strong> transform each element.</li>
+          <li><strong>filter:</strong> select matching elements.</li>
+          <li><strong>reduce:</strong> combine values into one result.</li>
+        </ul>
+        <h2>Spring Boot</h2>
+        <ul>
+          <li><strong>DI:</strong> container creates and injects dependencies.</li>
+          <li><strong>@Transactional:</strong> proxy-based transaction boundary.</li>
+          <li><strong>ControllerAdvice:</strong> central exception handling.</li>
+        </ul>
+      </section>
+    </div>
+  );
+}
+
+function SearchResults({ results, openTopic, startRecall }: { results: typeof topics; openTopic: () => void; startRecall: () => void }) {
+  return (
+    <div className="page-stack">
+      <PageHeader title="Search Results" subtitle={`${results.length} matching topic${results.length === 1 ? "" : "s"}`} />
+      <div className="topic-list">
+        {results.map((topic) => <TopicCard key={topic.title} topic={topic} open={openTopic} recall={startRecall} wide />)}
+      </div>
+    </div>
+  );
+}
+
+function TopicCard({ topic, open, recall, wide = false }: { topic: (typeof topics)[number]; open: () => void; recall: () => void; wide?: boolean }) {
+  return (
+    <article className={wide ? "topic-card wide" : "topic-card"}>
+      <div>
+        <h3>{topic.title}</h3>
+        <p className="muted">{topic.category} · {topic.area}</p>
+      </div>
+      <div className="tag-row">
+        {topic.tags.map((tag) => <span className={tag === "Weak Area" ? "tag weak" : "tag"} key={tag}>{tag}</span>)}
+      </div>
+      <p>{topic.summary}</p>
+      <div className="card-meta">
+        <span>Difficulty: {topic.difficulty}</span>
+        <span>Recall: {topic.recallCount} questions</span>
+      </div>
+      <div className="button-row">
+        <button onClick={open}>Open Note</button>
+        <button className="primary" onClick={recall}>Start Recall</button>
+      </div>
+    </article>
+  );
+}
+
+function PageHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <section className="page-header">
+      <h1>{title}</h1>
+      <p>{subtitle}</p>
     </section>
+  );
+}
+
+function SectionHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="section-header">
+      <h2>{title}</h2>
+      <p>{subtitle}</p>
+    </div>
+  );
+}
+
+function NoteSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="note-section">
+      <h2>{title}</h2>
+      <div>{children}</div>
+    </section>
+  );
+}
+
+function Progress({ value }: { value: number }) {
+  return (
+    <div className="progress" aria-label={`${value}% revised`}>
+      <span style={{ width: `${value}%` }} />
+    </div>
+  );
+}
+
+function InfoBlock({ title, items, tone = "default" }: { title: string; items: string[]; tone?: "default" | "warning" | "accent" }) {
+  return (
+    <section className={`info-block ${tone}`}>
+      <h2>{title}</h2>
+      <ul>
+        {items.map((item) => <li key={item}>{item}</li>)}
+      </ul>
+    </section>
+  );
+}
+
+function InsightCard({ title, text, open }: { title: string; text: string; open: () => void }) {
+  return (
+    <article className="insight-card">
+      <ShieldAlert size={20} />
+      <div>
+        <h2>{title}</h2>
+        <p>{text}</p>
+        <button onClick={open}>Open</button>
+      </div>
+    </article>
   );
 }

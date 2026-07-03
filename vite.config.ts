@@ -12,9 +12,9 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg"],
       manifest: {
-        name: "Void Cloud Notes",
-        short_name: "Void Notes",
-        description: "Local-first notes, folders, tags, and interview prep on Void Cloud.",
+        name: "RecallStack",
+        short_name: "RecallStack",
+        description: "Static personal interview-prep dashboard built around active recall.",
         theme_color: "#111827",
         background_color: "#f8fafc",
         display: "standalone",
